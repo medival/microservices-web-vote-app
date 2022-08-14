@@ -1,35 +1,28 @@
-from flask import Flask
-from flask import render_template
-from flask import request
-from flask import make_response
-from utils import connect_to_redis
+from flask import Flask, render_template, request, make_response, g
+from redis import Redis
 import os
 import socket
 import random
 import json
-import time
+import logging
 
 option_a = os.getenv('OPTION_A', "Cats")
 option_b = os.getenv('OPTION_B', "Dogs")
 hostname = socket.gethostname()
 
-db_server = "redis%s" % os.environ['WEB_VOTE_NUMBER']
-redis = connect_to_redis(db_server)
 app = Flask(__name__)
 
-@app.route("/env", methods=['GET'])
-def dump_env():
-    s = ''
-    for key in os.environ.keys():
-        s = "%s%30s=%s\n" % (s, key,os.environ[key])
-    resp = make_response(render_template(
-	    'env.html',
-	    s=s
-    ))
-    return resp
+gunicorn_error_logger = logging.getLogger('gunicorn.error')
+app.logger.handlers.extend(gunicorn_error_logger.handlers)
+app.logger.setLevel(logging.INFO)
+
+def get_redis():
+    if not hasattr(g, 'redis'):
+        g.redis = Redis(host="redis", db=0, socket_timeout=5)
+    return g.redis
 
 @app.route("/", methods=['POST','GET'])
-def index():
+def hello():
     voter_id = request.cookies.get('voter_id')
     if not voter_id:
         voter_id = hex(random.getrandbits(64))[2:-1]
@@ -37,9 +30,10 @@ def index():
     vote = None
 
     if request.method == 'POST':
+        redis = get_redis()
         vote = request.form['vote']
-	epoch_time_ms = long(time.time()*1000)
-	data = json.dumps({'voter_id': voter_id, 'vote': vote, 'ts': epoch_time_ms})
+        app.logger.info('Received vote for %s', vote)
+        data = json.dumps({'voter_id': voter_id, 'vote': vote})
         redis.rpush('votes', data)
 
     resp = make_response(render_template(
@@ -47,7 +41,6 @@ def index():
         option_a=option_a,
         option_b=option_b,
         hostname=hostname,
-	node="web%s" % os.environ['WEB_VOTE_NUMBER'],
         vote=vote,
     ))
     resp.set_cookie('voter_id', voter_id)
@@ -55,4 +48,4 @@ def index():
 
 
 if __name__ == "__main__":
-	app.run(host='0.0.0.0', port=80, debug=True)
+    app.run(host='0.0.0.0', port=80, debug=True, threaded=True)
